@@ -32,6 +32,7 @@ case $MODE in
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
         LOGGING_EXTRA=""
+        SAVE_EXTRA=""
         WANDB=true
         ;;
     train)
@@ -45,6 +46,9 @@ case $MODE in
     --tensorboard-dir \$TENSORBOARD_DIR
     --log-timers-to-tensorboard
     --log-memory-to-tensorboard"
+        SAVE_EXTRA="
+    --save \$LOG_DIR/checkpoints
+    --save-interval 500"
         WANDB=true
         ;;
     *)
@@ -163,7 +167,7 @@ cat >> "$SCRIPT" << 'SETUP'
 
 #########################################
 
-mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
+mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR $LOG_DIR/checkpoints
 
 cd $MEGATRON_LM_DIR
 flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
@@ -181,6 +185,9 @@ TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
     --use-precision-aware-optimizer
     --main-grads-dtype bf16
+    --fp8-format hybrid
+    --fp8-amax-history-len 1024
+    --fp8-amax-compute-algo max
 )
 
 SETUP
@@ -218,6 +225,7 @@ TRAINING_ARGS=(
     --no-check-for-nan-in-loss-and-grad
     --manual-gc
     --manual-gc-interval 50
+    --exit-signal-handler
 )
 
 REGULARIZATION_ARGS=(
@@ -265,6 +273,16 @@ ${LOGGING_EXTRA}
 )
 LOGGING_EXTRA
 
+cat >> "$SCRIPT" << 'SAVE_ARGS_OPEN'
+
+SAVE_ARGS=(
+SAVE_ARGS_OPEN
+
+cat >> "$SCRIPT" << SAVE_ARGS_CLOSE
+${SAVE_EXTRA}
+)
+SAVE_ARGS_CLOSE
+
 cat >> "$SCRIPT" << 'TOKENIZER'
 
 TOKENIZER_ARGS=(
@@ -299,6 +317,7 @@ TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
     ${MIXED_PRECISION_ARGS[@]} \
     ${DISTRIBUTED_ARGS[@]} \
     ${LOGGING_ARGS[@]} \
+    ${SAVE_ARGS[@]} \
     ${TOKENIZER_ARGS[@]} \
     ${DATA_ARGS[@]}"
 

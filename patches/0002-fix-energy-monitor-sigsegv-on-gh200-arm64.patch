@@ -1,0 +1,42 @@
+# Patch: Fix SIGSEGV in energy monitor on GH200/ARM64 during checkpoint save
+#
+# Problem:
+#   nvmlDeviceGetTotalEnergyConsumption() segfaults (SIGSEGV) on GH200/ARM64
+#   instead of raising NVMLError. This crash happens inside save_checkpoint_and_time()
+#   which calls energy_monitor.pause() before every checkpoint save, making
+#   checkpointing completely broken on this hardware.
+#
+# What this patch does:
+#   Disables NVML energy monitoring on aarch64 by setting has_nvml=False when
+#   running on ARM64. All energy monitor methods already guard on has_nvml, so
+#   this is a safe no-op disable with no effect on training or checkpointing.
+#
+# Where in the code:
+#   File: megatron/core/energy_monitor.py
+#   Location: module-level has_nvml assignment after pynvml import
+#
+# Applied to: Megatron-LM core_v0.16.1
+#
+diff --git a/megatron/core/energy_monitor.py b/megatron/core/energy_monitor.py
+index 4334cfe38..13854b9ca 100644
+--- a/megatron/core/energy_monitor.py
++++ b/megatron/core/energy_monitor.py
+@@ -2,6 +2,7 @@
+ 
+ """Megatron Energy Monitoring (NVML)"""
+ 
++import platform
+ import torch
+ import torch.distributed as dist
+ 
+@@ -14,7 +15,9 @@ try:
+         nvmlShutdown,
+     )
+ 
+-    has_nvml = True
++    # nvmlDeviceGetTotalEnergyConsumption segfaults on GH200/ARM64 instead of
++    # raising NVMLError, so disable NVML energy monitoring on aarch64.
++    has_nvml = platform.machine() != 'aarch64'
+ except ImportError:
+     has_nvml = False
+ 
