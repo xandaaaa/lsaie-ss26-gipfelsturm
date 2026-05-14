@@ -32,7 +32,9 @@ case $MODE in
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
         LOGGING_EXTRA=""
-        SAVE_EXTRA=""
+        SAVE_EXTRA="
+            --save \$LOG_DIR/checkpoints
+            --save-interval $TRAINING_STEPS"
         WANDB=true
         ;;
     train)
@@ -178,6 +180,12 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TRITON_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.triton_cache
 export TORCHINDUCTOR_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.inductor_cache
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
+export NVTE_FLASH_ATTN=1
+export NVTE_FUSED_ATTN=1
+export NVTE_FUSED_MLP=1
+export NCCL_NET_GDR_LEVEL=PHB
+export NCCL_CROSS_NIC=1
+export NCCL_BUFFSIZE=2097152
 MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
@@ -186,8 +194,10 @@ TRANSFORMER_ENGINE_ARGS=(
     --use-precision-aware-optimizer
     --main-grads-dtype bf16
     --fp8-format hybrid
+    --fp8-margin 0
     --fp8-amax-history-len 1024
     --fp8-amax-compute-algo max
+    --use-flash-attn-v2
 )
 
 SETUP
@@ -206,6 +216,8 @@ NETWORK_SIZE_ARGS=(
     --swiglu
     --untie-embeddings-and-output-weights
     --seq-length \$SEQ_LEN
+    --use-mcore-models
+    --use-fused-rmsnorm
 )
 MODEL
 
@@ -226,6 +238,7 @@ TRAINING_ARGS=(
     --manual-gc
     --manual-gc-interval 50
     --exit-signal-handler
+    --recompute-granularity selective
 )
 
 REGULARIZATION_ARGS=(
@@ -239,7 +252,9 @@ REGULARIZATION_ARGS=(
 
 LEARNING_RATE_ARGS=(
     --lr 3e-4
-    --lr-decay-style constant
+    --min-lr 1.0e-5
+    --lr-decay-style cosine
+    --lr-decay-iters $TRAINING_STEPS
     --lr-warmup-iters ${LR_WARMUP_ITERS}
 )
 TRAINING
@@ -295,7 +310,7 @@ DATA_ARGS=(
     --data-path $DATA_PREFIX
     --data-cache-path $DATASET_CACHE_DIR
     --split 99,1,0
-    --num-workers 1
+    --num-workers 16
 )
 
 TORCHRUN_ARGS=(
