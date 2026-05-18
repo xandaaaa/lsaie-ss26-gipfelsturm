@@ -64,26 +64,32 @@ case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
         MBS=16
+        TP=1; PP=1
         ;;
     350m)
         NUM_LAYERS=24; HIDDEN=1024; FFN=2816;  HEADS=16; KV_HEADS=4
         MBS=8
+        TP=1; PP=1
         ;;
     760m)
         NUM_LAYERS=24; HIDDEN=1536; FFN=4096;  HEADS=16; KV_HEADS=4
         MBS=4
+        TP=1; PP=1
         ;;
     1.5b)
         NUM_LAYERS=48; HIDDEN=1600; FFN=4352;  HEADS=20; KV_HEADS=4
         MBS=4
+        TP=2; PP=1
         ;;
     3b)
         NUM_LAYERS=32; HIDDEN=3072; FFN=8192;  HEADS=24; KV_HEADS=8
         MBS=4
+        TP=2; PP=2
         ;;
     8b)
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
         MBS=2
+        TP=4; PP=2
         ;;
     *)
         echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
@@ -91,7 +97,14 @@ case $MODEL_SIZE in
         ;;
 esac
 
-GBS=256
+GPUS_PER_NODE=4
+TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
+DP=$((TOTAL_GPUS / (TP * PP)))
+GBS=$((MBS * DP * 4))
+if [ "$GBS" -lt 32 ]; then
+    GBS=32
+fi
+
 SEQ_LEN=4096
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 
@@ -271,8 +284,8 @@ MIXED_PRECISION_ARGS=(
 )
 
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
