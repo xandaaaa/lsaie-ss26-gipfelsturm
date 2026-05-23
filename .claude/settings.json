@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(squeue --me --format=\"%.10i %.30j %.8T %.8l %.6D\")",
+      "Bash(sort -k5 -rn)"
+    ]
+  }
+}

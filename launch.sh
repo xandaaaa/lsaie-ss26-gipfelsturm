@@ -19,6 +19,10 @@ set -euo pipefail
 
 source "$(dirname "$0")/config.sh"
 
+if [ -z "${PARTITION:-}" ]; then
+    [[ "${1:-}" == "throughput" ]] && PARTITION=debug || PARTITION=normal
+fi
+
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
@@ -27,7 +31,7 @@ case $MODE in
     throughput)
         TRAINING_STEPS=${3:-50}
         NODES=${4:-4}
-        TIME=00:30:00
+        TIME=00:15:00
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
@@ -40,10 +44,11 @@ case $MODE in
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
         NODES=${4:-4}
-        TIME=02:30:00
-        EVAL_INTERVAL=1000
+        TIME=00:45:00
+        EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=10
-        LR_WARMUP_ITERS=200
+        LR_WARMUP_ITERS=$((TRAINING_STEPS / 20))
+        [ "$LR_WARMUP_ITERS" -lt 100 ] && LR_WARMUP_ITERS=100
         LOGGING_EXTRA="
     --tensorboard-dir \$TENSORBOARD_DIR
     --log-timers-to-tensorboard
@@ -63,33 +68,34 @@ esac
 case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
-        MBS=16
-        TP=1; PP=1
+        MBS=16; TP=1; PP=1
+        LR=6e-4; MIN_LR=6e-5
         ;;
     350m)
         NUM_LAYERS=24; HIDDEN=1024; FFN=2816;  HEADS=16; KV_HEADS=4
-        MBS=8
-        TP=1; PP=1
+        MBS=8; TP=1; PP=1
+        LR=3e-4; MIN_LR=3e-5
         ;;
     760m)
         NUM_LAYERS=24; HIDDEN=1536; FFN=4096;  HEADS=16; KV_HEADS=4
-        MBS=4
-        TP=1; PP=1
+        MBS=4; TP=1; PP=1
+        LR=2e-4; MIN_LR=2e-5
         ;;
     1.5b)
         NUM_LAYERS=48; HIDDEN=1600; FFN=4352;  HEADS=20; KV_HEADS=4
-        MBS=4
-        TP=2; PP=1
+        MBS=4; TP=2; PP=1
+        LR=2e-4; MIN_LR=2e-5
         ;;
     3b)
         NUM_LAYERS=32; HIDDEN=3072; FFN=8192;  HEADS=24; KV_HEADS=8
-        MBS=4
-        TP=2; PP=2
+        MBS=4; TP=2; PP=2
+        LR=1.5e-4; MIN_LR=1.5e-5
         ;;
     8b)
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
-        MBS=2
-        TP=4; PP=2
+        MBS=2; TP=4; PP=2
+        LR=1e-4; MIN_LR=1e-5
+        [ "$MODE" = "train" ] && TIME=00:40:00
         ;;
     *)
         echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
@@ -97,16 +103,24 @@ case $MODEL_SIZE in
         ;;
 esac
 
+# Allow overrides from environment
+TIME=${TIME_OVERRIDE:-$TIME}
+LR=${LR_OVERRIDE:-$LR}
+MIN_LR=${MIN_LR_OVERRIDE:-$MIN_LR}
+
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
 DP=$((TOTAL_GPUS / (TP * PP)))
-GBS=$((MBS * DP * 4))
+GBS_MULT=${GBS_MULT:-4}
+GBS=$((MBS * DP * GBS_MULT))
 if [ "$GBS" -lt 32 ]; then
     GBS=32
 fi
 
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+LR_TAG=${LR_OVERRIDE:+-lr${LR_OVERRIDE}}
+GBS_TAG=${GBS_MULT:+}; [ "$GBS_MULT" != "4" ] && GBS_TAG="-gbs${GBS_MULT}" || GBS_TAG=""
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n${LR_TAG}${GBS_TAG}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -137,6 +151,7 @@ HEADER
 
 cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --account=${SBATCH_ACCOUNT}
+#SBATCH --partition=${PARTITION}
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log
@@ -170,6 +185,10 @@ MBS=${MBS}
 GBS=${GBS}
 SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
+
+# Parallelism
+TP=${TP}
+PP=${PP}
 
 # Logging
 PROJECT_NAME=gipfelsturm
@@ -210,7 +229,6 @@ TRANSFORMER_ENGINE_ARGS=(
     --fp8-margin 0
     --fp8-amax-history-len 1024
     --fp8-amax-compute-algo max
-    --use-flash-attn-v2
 )
 
 SETUP
@@ -230,7 +248,6 @@ NETWORK_SIZE_ARGS=(
     --untie-embeddings-and-output-weights
     --seq-length \$SEQ_LEN
     --use-mcore-models
-    --use-fused-rmsnorm
 )
 MODEL
 
@@ -264,8 +281,8 @@ REGULARIZATION_ARGS=(
 )
 
 LEARNING_RATE_ARGS=(
-    --lr 3e-4
-    --min-lr 1.0e-5
+    --lr ${LR}
+    --min-lr ${MIN_LR}
     --lr-decay-style cosine
     --lr-decay-iters $TRAINING_STEPS
     --lr-warmup-iters ${LR_WARMUP_ITERS}
