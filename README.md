@@ -2,6 +2,50 @@
 
 *Gipfelsturm* (German: "summit attempt"), a race to *peak performance*. Inspired by nanoGPT/nanochat which are educational single-node setups, Gipfelsturm focuses on distributed LLM training on production-grade infrastructure. We use [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), the de facto industry standard for distributed LLM training, running on the [CSCS Alps supercomputer](https://arxiv.org/abs/2507.02404) with [GH200 compute nodes connected via Slingshot-11](https://arxiv.org/abs/2408.11556).
 
+## Project Submission
+
+This fork targets **Challenge 1**: minimizing evaluation loss on `Nemotron-ClimbMix` under fixed wall-clock budgets (30 min / 1 hr / 2 hr) on 8 GH200 nodes (32 GPUs). Authors: Xander Yap, Milan Schabort, Zhijing Liu.
+
+**Best validation losses** (760M, full data parallelism, $TP=1$, $PP=1$, $DP=32$):
+
+| Budget  | Model | Val Loss |
+|---------|-------|----------|
+| 30 min  | 760M  | **2.19** |
+| 1 hr    | 760M  | **1.99** |
+| 2 hr    | 760M  | **1.83** |
+
+See the project report for the full ablation across 125M–8B and learning-rate sweep.
+
+### What this fork adds on top of the upstream template
+
+- **FP8 mixed precision** via NVIDIA `TransformerEngine` (`--fp8-format hybrid`, `--use-precision-aware-optimizer`, `--main-grads-dtype bf16`, amax history 1024).
+- **FlashAttention-2 and kernel fusion**: `NVTE_FLASH_ATTN`, `NVTE_FUSED_ATTN`, `NVTE_FUSED_MLP`, cross-entropy loss fusion, manual GC, selective recompute, signal-handled exits.
+- **Per-model-size parallelism** tuned for GH200 (e.g. 760M $TP{=}1,PP{=}1$; 3B $TP{=}2,PP{=}2$; 8B $TP{=}4,PP{=}2$).
+- **Sweep overrides**: `LR_OVERRIDE`, `MIN_LR_OVERRIDE`, `TIME_OVERRIDE`, `GBS_MULT` with run-name tagging for learning-rate / batch-size sweeps.
+- **ARM64 checkpointing fix**: new patch [`patches/0002-fix-energy-monitor-sigsegv-on-gh200-arm64.patch`](patches/0002-fix-energy-monitor-sigsegv-on-gh200-arm64.patch) for a Megatron checkpoint-save SIGSEGV on GH200.
+- **Full run logs** under [`logs/`](logs/) for reproducibility.
+
+### How to reproduce
+
+After completing the [Setup](#setup) section below (config, submodule, EDF):
+
+```bash
+# 30-min run (best 760M, lr=4e-4 on 8 nodes)
+LR_OVERRIDE=4e-4 MIN_LR_OVERRIDE=4e-5 TIME_OVERRIDE=00:35:00 \
+    ./launch.sh train 760m 909 8
+
+# 1-hr run (760M, default lr=2e-4)
+TIME_OVERRIDE=01:05:00 ./launch.sh train 760m 1819 8
+
+# 2-hr run (760M)
+TIME_OVERRIDE=02:05:00 ./launch.sh train 760m 3638 8
+
+# Throughput benchmark (any model size)
+./launch.sh throughput 760m 50 8
+```
+
+Step counts are derived from each model's measured tokens/sec/GPU times the budget (see baselines table further down).
+
 There are two dimensions on which you can improve. Your team should focus on at least one.
 
 ### Challenge 1: improve loss or compare with alternative method given fixed time
@@ -234,6 +278,7 @@ As we upgrade Megatron-LM to a new release version, we will attempt to apply all
 | Patch | Description |
 |-------|-------------|
 | `0001-log-tokens-per-sec-to-wandb.patch` | Logs tokens/sec/GPU to stdout, TensorBoard, and W&B |
+| `0002-fix-energy-monitor-sigsegv-on-gh200-arm64.patch` | Workaround for energy-monitor SIGSEGV on GH200/ARM64 during checkpoint save |
 
 ## References
 

@@ -1,3 +1,5 @@
 data/climbmix_small/
 config.sh
 report/
+wandb_exports/
+/logs
